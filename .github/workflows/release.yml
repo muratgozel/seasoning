@@ -31,9 +31,18 @@ jobs:
             exit 1
           fi
 
+      # setup-go reads go.mod's go line (the oldest Go that builds it), not
+      # the toolchain line that builds must use.
+      - name: toolchain from go.mod
+        id: toolchain
+        run: |
+          v="$(sed -n 's/^toolchain go//p' go.mod)"
+          if [ -z "$v" ]; then echo "::error::go.mod has no toolchain line"; exit 1; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: ${{ steps.toolchain.outputs.version }}
           cache: true
 
       - name: go test

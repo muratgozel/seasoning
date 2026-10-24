@@ -328,7 +328,7 @@ switch_to() {
 # A binary installed by hand (a regular file) is copied into the versions
 # directory first, so update can roll back to it.
 adopt_binary() {
-	[ -f "$BIN" ] && [ ! -L "$BIN" ] || return 0
+	if [ ! -f "$BIN" ] || [ -L "$BIN" ]; then return 0; fi
 	local v
 	v=$("$BIN" version 2>/dev/null | awk '{ print $2 }') || v=""
 	valid_version "$v" || v=dev
@@ -503,7 +503,7 @@ cmd_tls() {
 	[ -n "$domain" ] || die "--domain is required, e.g. relay.sh tls --domain relay.example.com --email you@example.com"
 	valid_domain "$domain" || die "'$domain' is not a hostname such as relay.example.com"
 	[ -z "$EMAIL" ] || valid_email "$EMAIL" || die "'$EMAIL' is not an email address"
-	valid_port "$DNS_WAIT" && [ "$DNS_WAIT" -ge 10 ] || die "--dns-wait must be at least 10 seconds"
+	if ! valid_port "$DNS_WAIT" || [ "$DNS_WAIT" -lt 10 ]; then die "--dns-wait must be at least 10 seconds"; fi
 	apt_install nginx certbot python3-certbot-dns-cloudflare
 
 	step "certificate"
@@ -859,7 +859,7 @@ main() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--port | --version | --domain | --email | --dir | --dns-wait)
-				[ $# -ge 2 ] && [ -n "$2" ] || die "$1 needs a value"
+				if [ $# -lt 2 ] || [ -z "$2" ]; then die "$1 needs a value"; fi
 				case "$1" in
 					--port) PORT=$2 ;;
 					--version) VERSION=$2 ;;

@@ -208,7 +208,7 @@ step "token rotation locks out the old token only"
 old=$(token)
 out=$(relay token --rotate --yes) || fail "rotation failed: $out"
 new=$(token)
-[ "$new" != "$old" ] && [ -n "$new" ] || fail "token unchanged"
+if [ "$new" = "$old" ] || [ -z "$new" ]; then fail "token unchanged"; fi
 case "$out" in *"$new"*) ;; *) fail "new token not printed" ;; esac
 if out=$(init_project 2 "$old"); then fail "the old token still creates projects"; fi
 out=$(init_project 2 "$new") || fail "the new token was refused: $out"
@@ -265,7 +265,7 @@ x test ! -e /etc/nginx/sites-enabled/seasoning.conf || fail "site left behind"
 x test -f /var/lib/seasoning/relay.db || fail "database deleted without --purge"
 out=$(relay install) || fail "reinstall failed: $out"
 out=$(relay tls --domain "$DOMAIN") || fail "tls after reinstall failed: $out"
-[ "$(token)" = "$tok" ] && [ "$(projects)" = 1 ] || fail "token or projects lost"
+if [ "$(token)" != "$tok" ] || [ "$(projects)" != 1 ]; then fail "token or projects lost"; fi
 x curl -fsS "https://$DOMAIN/healthz" >/dev/null || fail "https broken after reinstall"
 ok
 

@@ -1525,8 +1525,12 @@ both directions in both sessions' transcripts or panes.
 **Toolchain.** Go 1.25 reached end of life with Go 1.27's release.
 - On 1.25.5, govulncheck found 29 standard-library vulnerabilities that the
   code reaches (net/http, crypto/tls, crypto/x509).
-- `go.mod` now says `go 1.26.0` with `toolchain go1.27.3`. CI and releases
-  install that toolchain through setup-go, which reads the toolchain line.
+- `go.mod` now says `go 1.26.0` with `toolchain go1.27.3`. setup-go reads
+  only the go line, so the workflows read the toolchain line themselves and
+  pass it as `go-version`. The first CI run caught this: it built with 1.26.0,
+  and govulncheck failed.
+- The runner's shellcheck is older than 0.11 and flags SC2015
+  (`a && b || c`). Write those as `if` statements.
 - Also bumped: `golang.org/x/crypto` v0.58.0 and `modernc.org/sqlite` v1.61.0.
 - CI and the release workflow run govulncheck (pinned v1.9.0). It fails only
   on reachable vulnerabilities, which usually means bumping the toolchain line.

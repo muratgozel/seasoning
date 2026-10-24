@@ -17,13 +17,22 @@ jobs:
     name: go
     runs-on: ubuntu-latest
     env:
-      GOTOOLCHAIN: local # use exactly the toolchain setup-go installed from go.mod
+      GOTOOLCHAIN: local # use exactly the toolchain setup-go installed
     steps:
       - uses: actions/checkout@v7
 
+      # setup-go reads go.mod's go line (the oldest Go that builds it), not
+      # the toolchain line that builds must use.
+      - name: toolchain from go.mod
+        id: toolchain
+        run: |
+          v="$(sed -n 's/^toolchain go//p' go.mod)"
+          if [ -z "$v" ]; then echo "::error::go.mod has no toolchain line"; exit 1; fi
+          echo "version=$v" >>"$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod # the toolchain line wins over the go line
+          go-version: ${{ steps.toolchain.outputs.version }}
           cache: true
 
       - name: gofmt
