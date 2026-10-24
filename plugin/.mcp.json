@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "seasoning": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+      "args": ["mcp", "--plugin-proto", "1"]
+    }
+  }
+}

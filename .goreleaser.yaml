@@ -1,0 +1,83 @@
+# goreleaser v2 — https://goreleaser.com
+#
+# Asset names and layout are a contract with scripts/install.sh and
+# internal/selfupdate: seasoning_<version>_<os>_<arch>.tar.gz with the
+# `seasoning` binary at the archive root, plus checksums.txt (sha256).
+version: 2
+
+project_name: seasoning
+
+builds:
+  - id: seasoning
+    main: ./cmd/seasoning
+    binary: seasoning
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/muratgozel/seasoning/internal/version.Version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: seasoning
+    ids: [seasoning]
+    formats: [tar.gz]
+    name_template: "seasoning_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    wrap_in_directory: false
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+# The relay image (SPEC D18): one multi-arch image on GHCR, built with buildx
+# in the publish phase. Prereleases don't move latest.
+dockers_v2:
+  - id: relay
+    ids: [seasoning]
+    dockerfile: deploy/Dockerfile
+    images:
+      - ghcr.io/muratgozel/seasoning
+    tags:
+      - "{{ .Version }}"
+      - "{{ if not .Prerelease }}latest{{ end }}"
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    labels:
+      org.opencontainers.image.title: seasoning
+      org.opencontainers.image.description: "seasoning relay: routes end-to-end encrypted messages between coding agents."
+      org.opencontainers.image.source: https://github.com/muratgozel/seasoning
+      org.opencontainers.image.version: "{{ .Version }}"
+      org.opencontainers.image.revision: "{{ .FullCommit }}"
+      org.opencontainers.image.licenses: MIT
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: git
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+release:
+  github:
+    owner: muratgozel
+    name: seasoning
+  # vX.Y.Z-rc.1 tags become prereleases, which GitHub's /releases/latest
+  # (used by the installer and `seasoning update`) skips.
+  prerelease: auto

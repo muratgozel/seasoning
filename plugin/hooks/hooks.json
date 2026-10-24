@@ -1,0 +1,133 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+            "args": [
+              "hook",
+              "session-start",
+              "--plugin-proto",
+              "1"
+            ],
+            "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+            "args": [
+              "hook",
+              "wait",
+              "--plugin-proto",
+              "1"
+            ],
+            "timeout": 604800,
+            "asyncRewake": true,
+            "rewakeMessage": "seasoning: new message for this session."
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+            "args": [
+              "hook",
+              "user-prompt-submit",
+              "--plugin-proto",
+              "1"
+            ],
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+            "args": [
+              "hook",
+              "pre-tool-use",
+              "--plugin-proto",
+              "1"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+            "args": [
+              "hook",
+              "post-tool-use",
+              "--plugin-proto",
+              "1"
+            ],
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+            "args": [
+              "hook",
+              "stop",
+              "--plugin-proto",
+              "1"
+            ],
+            "timeout": 10
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+            "args": [
+              "hook",
+              "wait",
+              "--plugin-proto",
+              "1"
+            ],
+            "timeout": 604800,
+            "asyncRewake": true,
+            "rewakeMessage": "seasoning: new message for this session."
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/bin/seasoning-run",
+            "args": [
+              "hook",
+              "session-end",
+              "--plugin-proto",
+              "1"
+            ],
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}

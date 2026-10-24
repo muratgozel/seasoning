@@ -1,0 +1,58 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write # the relay image on GHCR
+
+jobs:
+  goreleaser:
+    name: goreleaser
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # goreleaser needs full history for the changelog
+
+      # Claude Code updates an installed plugin only when its version changes,
+      # so every release must bump plugin/.claude-plugin/plugin.json.
+      - name: plugin version matches the tag
+        run: |
+          want="${GITHUB_REF_NAME#v}"
+          got="$(jq -r .version plugin/.claude-plugin/plugin.json)"
+          if [ "$got" != "$want" ]; then
+            echo "::error::plugin/.claude-plugin/plugin.json has version $got; set it to $want before tagging $GITHUB_REF_NAME"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test
+        run: go test -race ./...
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+      # The image's only RUN step runs on the build platform, so no QEMU.
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_seasoning_seasoning",
+      "mcp__plugin_seasoning_seasoning__peers",
+      "mcp__plugin_seasoning_seasoning__send",
+      "mcp__plugin_seasoning_seasoning__inbox",
+      "mcp__plugin_seasoning_seasoning__set_status",
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Skill"
+    ],
+    "deny": ["SendMessage", "ListAgents"]
+  }
+}

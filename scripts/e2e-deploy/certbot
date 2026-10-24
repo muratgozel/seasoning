@@ -1,0 +1,24 @@
+#!/bin/bash
+# Stands in for certbot in the deploy e2e. It records its arguments, checks
+# the Cloudflare credentials file relay.sh wrote, and issues a certificate
+# from the image's test CA where Let's Encrypt would put one.
+set -euo pipefail
+printf '%s\n' "$*" >>/var/log/fake-certbot.log
+[ "${1:-}" = certonly ] || { echo "fake certbot: only certonly is supported" >&2; exit 2; }
+domain="" creds=""
+while [ $# -gt 0 ]; do
+	case "$1" in
+		-d) domain=$2 && shift ;;
+		--dns-cloudflare-credentials) creds=$2 && shift ;;
+	esac
+	shift
+done
+[ -n "$domain" ] && [ -n "$creds" ] || { echo "fake certbot: missing -d or credentials" >&2; exit 2; }
+[ "$(stat -c '%a %U' "$creds")" = "600 root" ] || { echo "fake certbot: $creds must be 0600 root" >&2; exit 1; }
+grep -q '^dns_cloudflare_api_token = [[:graph:]]\{20,\}$' "$creds" || { echo "fake certbot: bad credentials file" >&2; exit 1; }
+live=/etc/letsencrypt/live/$domain
+mkdir -p "$live"
+openssl req -new -newkey rsa:2048 -nodes -subj "/CN=$domain" -keyout "$live/privkey.pem" -out /tmp/fake-certbot.csr 2>/dev/null
+openssl x509 -req -in /tmp/fake-certbot.csr -CA /etc/test-ca/ca.pem -CAkey /etc/test-ca/ca.key -CAcreateserial \
+	-days 90 -extfile <(printf 'subjectAltName=DNS:%s' "$domain") -out "$live/fullchain.pem" 2>/dev/null
+echo "Successfully received certificate."

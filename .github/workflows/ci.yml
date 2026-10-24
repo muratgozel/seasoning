@@ -1,0 +1,74 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go
+    runs-on: ubuntu-latest
+    env:
+      GOTOOLCHAIN: local # use exactly the toolchain setup-go installed from go.mod
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod # the toolchain line wins over the go line
+          cache: true
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l cmd internal)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt needed on the files below; run 'gofmt -w cmd internal'"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go test
+        run: go test -race ./...
+
+      - name: binary e2e
+        run: make e2e
+
+      # Fails only on vulnerabilities the code can reach; a new one in the
+      # standard library usually means bumping the toolchain line in go.mod.
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  scripts:
+    name: scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # shellcheck is preinstalled on GitHub's Ubuntu runners.
+      - name: shell scripts
+        run: |
+          bash -n scripts/install.sh scripts/e2e.sh scripts/e2e-live/scenario.sh deploy/relay.sh scripts/e2e-deploy/test.sh
+          sh -n scripts/e2e-live/run.sh plugin/bin/seasoning-run
+          shellcheck scripts/install.sh scripts/e2e.sh scripts/e2e-live/run.sh plugin/bin/seasoning-run deploy/relay.sh scripts/e2e-deploy/test.sh
+          shellcheck -s bash scripts/e2e-live/scenario.sh
+
+      - name: deploy templates match deploy/relay.sh
+        run: |
+          bash deploy/relay.sh render unit | diff -u deploy/systemd/seasoning-relay.service -
+          bash deploy/relay.sh render nginx | diff -u deploy/nginx/seasoning.conf -
+
+      - uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          args: check

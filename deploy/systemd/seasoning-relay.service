@@ -1,0 +1,42 @@
+# The seasoning relay as a systemd service. deploy/relay.sh installs it
+# (relay.sh install); change the template there.
+[Unit]
+Description=seasoning relay
+Documentation=https://github.com/muratgozel/seasoning
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=seasoning
+Group=seasoning
+EnvironmentFile=/etc/seasoning/relay.env
+ExecStart=/usr/local/bin/seasoning serve --listen 127.0.0.1:8090 --db /var/lib/seasoning/relay.db --trust-proxy
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+StateDirectory=seasoning
+StateDirectoryMode=0700
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

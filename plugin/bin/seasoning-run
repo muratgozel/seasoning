@@ -1,0 +1,26 @@
+#!/bin/sh
+# Runs the seasoning binary for the Claude Code plugin. Looks in
+# $SEASONING_BIN, ~/.local/bin (where the installer puts it, and which a
+# GUI-launched Claude Code may lack on PATH), then PATH.
+#
+# A missing binary must never break the session: hooks exit 0, and only
+# SessionStart says how to install it (its stdout becomes context).
+for b in "${SEASONING_BIN:-}" "${HOME:-}/.local/bin/seasoning"; do
+	if [ -n "$b" ] && [ -x "$b" ]; then exec "$b" "$@"; fi
+done
+if command -v seasoning >/dev/null 2>&1; then exec seasoning "$@"; fi
+
+install='curl -fsSL https://raw.githubusercontent.com/muratgozel/seasoning/main/scripts/install.sh | bash'
+case "${1:-}" in
+	hook)
+		cat >/dev/null
+		if [ "${2:-}" = session-start ]; then
+			echo "seasoning: the seasoning plugin is installed but the seasoning program is not. Tell your human to install it with: $install"
+		fi
+		exit 0
+		;;
+	*)
+		echo "seasoning is not installed; install it with: $install" >&2
+		exit 1
+		;;
+esac

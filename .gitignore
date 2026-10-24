@@ -1,0 +1,15 @@
+# Secrets and local state never belong in this public repo.
+.secrets/
+*.env
+.env*
+!.env.example
+
+# Build and test output
+/bin/
+/seasoning
+/dist/
+*.db
+*.db-shm
+*.db-wal
+# Phase 0 probes (SPEC §23): kept locally, not published.
+spikes/

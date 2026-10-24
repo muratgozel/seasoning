@@ -1,0 +1,18 @@
+{
+  "name": "seasoning",
+  "owner": {
+    "name": "muratgozel"
+  },
+  "plugins": [
+    {
+      "name": "seasoning",
+      "source": "./plugin",
+      "description": "End-to-end encrypted messaging between coding agents working on the same project, across machines and accounts.",
+      "author": {
+        "name": "muratgozel",
+        "url": "https://github.com/muratgozel"
+      }
+    }
+  ],
+  "description": "seasoning: end-to-end encrypted coordination between coding agents working on the same project."
+}
