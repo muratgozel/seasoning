@@ -54,10 +54,27 @@ func (a *Agent) current(ctx context.Context) (*bound, *localdb.Session, error) {
 	return b, s, nil
 }
 
-// WaitBound waits up to max for the agent to bind its session (the human
-// CLI starts an agent and then acts at once).
+// WaitBound waits up to max for the agent to bind its session and register
+// it at the relay (the human CLI starts an agent and then acts at once).
+// Binding alone isn't enough: registration is the presence loop's first
+// PUT, and a send that beats it is refused as from an unknown session. A
+// relay known to be down ends the wait early, so the action that follows
+// fails fast with its own actionable error (SPEC D25).
 func (a *Agent) WaitBound(ctx context.Context, max time.Duration) error {
-	if a.awaitBinding(ctx, max) == nil {
+	deadline := time.Now().Add(max)
+	b := a.awaitBinding(ctx, max)
+	for b != nil && !b.registered() && a.DownSince().IsZero() {
+		if time.Now().After(deadline) {
+			b = nil
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	if b == nil {
 		return errors.New("seasoning could not start a session for this project in time; check that the relay is reachable (seasoning doctor)")
 	}
 	return nil
@@ -211,7 +228,11 @@ type SendInput struct {
 	Body          string
 	ReplyExpected *bool
 	Urgent        bool
-	InReplyTo     string
+	// Wake overrides whether sessions named directly wake if idle; nil means
+	// the default (SPEC D27): wake when a reply is expected, or when the
+	// message answers a question still waiting for this session's reply.
+	Wake      *bool
+	InReplyTo string
 }
 
 // Send validates, resolves, seals and posts a message (SPEC §9.2).
@@ -222,6 +243,9 @@ func (a *Agent) Send(ctx context.Context, in SendInput) (string, error) {
 	}
 	if in.ReplyExpected == nil {
 		return "", errors.New("reply_expected is required: true if you need an answer, false for FYI")
+	}
+	if in.Urgent && in.Wake != nil && !*in.Wake {
+		return "", errors.New("urgent wakes every recipient, so it can't be combined with wake=false; drop one of them")
 	}
 	in.Body = strings.ReplaceAll(strings.ReplaceAll(in.Body, "\r\n", "\n"), "\r", "\n")
 	in.Subject = strings.TrimSpace(in.Subject)
@@ -270,6 +294,7 @@ func (a *Agent) Send(ctx context.Context, in SendInput) (string, error) {
 		return "", err
 	}
 	thread := msg.MessageID
+	wake := msg.ReplyExpected
 	if in.InReplyTo != "" {
 		parent, err := a.o.DB.FindParent(ctx, b.sid, in.InReplyTo)
 		if err != nil {
@@ -278,6 +303,8 @@ func (a *Agent) Send(ctx context.Context, in SendInput) (string, error) {
 		if parent == nil {
 			return "", fmt.Errorf("in_reply_to %s is not a message this session received or sent; check the id with the inbox tool", in.InReplyTo)
 		}
+		// Its sender asked and is likely idle waiting for this answer.
+		wake = wake || parent.AwaitsReply
 		msg.InReplyTo = &parent.MessageID
 		msg.References = append(append([]string{}, parent.References...), parent.MessageID)
 		if len(msg.References) > envelope.MaxReferences {
@@ -286,6 +313,11 @@ func (a *Agent) Send(ctx context.Context, in SendInput) (string, error) {
 		}
 		thread = msg.References[0]
 	}
+	if in.Wake != nil {
+		wake = *in.Wake
+	}
+	wake = wake || msg.Urgent
+	msg.Wake = &wake
 	if err := msg.Validate(); err != nil {
 		return "", err
 	}
@@ -325,6 +357,14 @@ func (a *Agent) Send(ctx context.Context, in SendInput) (string, error) {
 		a.o.DB.MarkReplied(ctx, b.sid, in.InReplyTo)
 	}
 
+	// Idle recipients this message won't wake, so the sender knows when it
+	// will be read.
+	asleep := map[string]bool{}
+	for _, v := range views {
+		if v.p.Activity == envelope.ActivityIdle && !msg.Urgent && !(wake && namedDirectly(addrs, v)) {
+			asleep[v.Session] = true
+		}
+	}
 	var w strings.Builder
 	fmt.Fprintf(&w, "Sent %s %q (thread %s).\n", msg.MessageID, msg.Subject, thread)
 	for _, r := range resp.Recipients {
@@ -339,6 +379,8 @@ func (a *Agent) Send(ctx context.Context, in SendInput) (string, error) {
 			fmt.Fprintf(&w, "- %s: session ended; held up to 7 days in case it resumes\n", h)
 		case r.State == relayapi.StateAway:
 			fmt.Fprintf(&w, "- %s: away (no recent heartbeat); queued\n", h)
+		case asleep[r.Session]:
+			fmt.Fprintf(&w, "- %s: live but idle; queued for its next turn, not woken\n", h)
 		default:
 			fmt.Fprintf(&w, "- %s: live; queued\n", h)
 		}
@@ -361,6 +403,17 @@ func (a *Agent) unreachable(b *bound, err error) error {
 		detail = fmt.Sprintf(" (%v)", ue.Err)
 	}
 	return fmt.Errorf("relay %s unreachable since %s UTC%s; the message was NOT sent. Retry later or tell your human", b.j.Project.Relay, since.UTC().Format("15:04"), detail)
+}
+
+// namedDirectly reports whether an address names v's session by its handle
+// or an alias, rather than through person/* or *.
+func namedDirectly(addrs []envelope.Address, v peerView) bool {
+	for _, ad := range addrs {
+		if h := ad.String(); ad.IsSession() && (v.p.Handle == h || slices.Contains(v.p.Aliases, h)) {
+			return true
+		}
+	}
+	return false
 }
 
 // resolve maps addresses to relay sessions using trusted presence (SPEC §9.2).

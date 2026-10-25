@@ -385,7 +385,9 @@ func (r *run) repoPath(s *localdb.Session) string {
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(r.in.Cwd, p)
 	}
-	rel, err := filepath.Rel(s.RepoRoot, resolve(p))
+	p = resolve(p)
+	root, _ := worktree(s, p)
+	rel, err := filepath.Rel(root, p)
 	if err != nil {
 		return ""
 	}
@@ -394,6 +396,26 @@ func (r *run) repoPath(s *localdb.Session) string {
 		return ""
 	}
 	return rel
+}
+
+// worktree returns the directory a session reports p relative to: the top
+// of the work tree containing p, when that is a worktree of the session's
+// repository, else the session's root. inRepo is false outside it.
+//
+// The session's root is the checkout it started in, but sessions move into
+// other worktrees (EnterWorktree, cd, ../repo-feature checkouts). Relative
+// to the starting root, two sessions in two worktrees would name the same
+// file .claude/worktrees/a/f.go and .claude/worktrees/b/f.go (or ../app-b/
+// f.go, which is dropped as outside the repo), and never warn each other.
+func worktree(s *localdb.Session, p string) (dir string, inRepo bool) {
+	top, common, ok := gitremote.Worktree(p)
+	if !ok {
+		return s.RepoRoot, false
+	}
+	if _, mine, ok := gitremote.Worktree(s.RepoRoot); ok && mine == common {
+		return top, true
+	}
+	return s.RepoRoot, false
 }
 
 // resolve resolves symlinks in p's deepest existing ancestor, since the file
@@ -528,11 +550,11 @@ func (r *run) sentDisplay() string {
 		return ""
 	}
 	var in struct {
-		To            []string `json:"to"`
-		Subject       string   `json:"subject"`
-		Body          string   `json:"body"`
-		ReplyExpected bool     `json:"reply_expected"`
-		Urgent        bool     `json:"urgent"`
+		To            envelope.AddressList `json:"to"`
+		Subject       string               `json:"subject"`
+		Body          string               `json:"body"`
+		ReplyExpected bool                 `json:"reply_expected"`
+		Urgent        bool                 `json:"urgent"`
 	}
 	raw, _ := json.Marshal(r.in.ToolInput)
 	if json.Unmarshal(raw, &in) != nil || len(in.To) == 0 {
@@ -551,8 +573,14 @@ func (r *run) stop(ctx context.Context) error {
 	if err != nil || s == nil {
 		return err
 	}
-	if s.RepoRoot != "" {
-		changed, err := gitremote.Changed(ctx, s.RepoRoot, 500*time.Millisecond)
+	// The work tree the session is in now (cwd follows EnterWorktree and cd):
+	// scan it for changes made through Bash, and report its branch.
+	dir, inRepo := s.RepoRoot, false
+	if r.in.Cwd != "" {
+		dir, inRepo = worktree(s, resolve(r.in.Cwd))
+	}
+	if dir != "" {
+		changed, err := gitremote.Changed(ctx, dir, 500*time.Millisecond)
 		if err == nil {
 			now := r.d.Now()
 			for i, p := range changed {
@@ -565,8 +593,17 @@ func (r *run) stop(ctx context.Context) error {
 			}
 		}
 	}
+	branch := ""
+	if inRepo {
+		bctx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		branch, _ = gitremote.Branch(bctx, dir)
+		cancel()
+	}
 	if _, err := r.db.UpdateSession(ctx, s.LocalID, func(x *localdb.Session) error {
 		x.Activity = envelope.ActivityIdle
+		if branch != "" {
+			x.Branch, x.Worktree = branch, filepath.Base(dir)
+		}
 		x.UpdatedAt = r.d.Now().UnixMilli()
 		return nil
 	}); err != nil {

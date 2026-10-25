@@ -372,6 +372,13 @@ func (a *Agent) putFailed(ctx context.Context, b *bound, err error) {
 	b.mu.Unlock()
 }
 
+// registered reports whether the session's presence reached the relay.
+func (b *bound) registered() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.lastPresence != ""
+}
+
 // Poke publishes presence now (after set_status).
 func (b *bound) Poke() {
 	select {

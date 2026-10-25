@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/muratgozel/seasoning/internal/keys"
@@ -79,6 +80,32 @@ func (a Address) String() string {
 // those messages are wake-eligible without "urgent" (SPEC D5, D23).
 func (a Address) IsSession() bool { return !a.All && a.Label != "*" }
 
+// AddressList is a send request's recipients as tools receive them: a JSON
+// array of addresses, or one string holding addresses separated by commas or
+// spaces (models often write a lone recipient that way), or a JSON array
+// encoded as a string. Addresses are checked later, by ParseAddress.
+type AddressList []string
+
+// UnmarshalJSON accepts every form AddressList describes.
+func (l *AddressList) UnmarshalJSON(b []byte) error {
+	var list []string
+	if err := json.Unmarshal(b, &list); err == nil {
+		*l = list
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
+		return errors.New(`to must be a list of addresses, such as ["bob/fix-session-store"], or one address as a string`)
+	}
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "[") && json.Unmarshal([]byte(s), &list) == nil {
+		*l = list
+		return nil
+	}
+	*l = strings.FieldsFunc(s, func(r rune) bool { return r == ',' || unicode.IsSpace(r) })
+	return nil
+}
+
 // crockford is the ULID alphabet.
 const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
@@ -146,8 +173,16 @@ type Message struct {
 	References    []string `json:"references"`
 	ReplyExpected bool     `json:"reply_expected"`
 	Urgent        bool     `json:"urgent"`
-	Body          string   `json:"body"`
+	// Wake is the sender's decision whether recipients it names directly
+	// wake if idle (SPEC D27). Senders before it existed omit it, and their
+	// direct messages always woke.
+	Wake *bool  `json:"wake,omitempty"`
+	Body string `json:"body"`
 }
+
+// WakesDirect reports whether the message wakes the sessions it names
+// directly. Urgent messages wake every recipient regardless.
+func (m *Message) WakesDirect() bool { return m.Wake == nil || *m.Wake }
 
 // Validate checks every field against SPEC §8.3. Errors name the field and
 // the rule so an agent can fix its input.

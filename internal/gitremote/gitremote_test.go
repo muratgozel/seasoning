@@ -139,3 +139,58 @@ func TestBranchAndChanged(t *testing.T) {
 		t.Fatalf("detached branch = %q", b)
 	}
 }
+
+func TestWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(t.TempDir(), "gitconfig"))
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	main := filepath.Join(root, "app")
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=T", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=T", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	os.MkdirAll(main, 0o755)
+	git(main, "init", "-q", "-b", "main")
+	git(main, "commit", "-q", "--allow-empty", "-m", "init")
+	git(main, "worktree", "add", "-q", "-b", "nested", filepath.Join(main, ".claude", "worktrees", "a"))
+	git(main, "worktree", "add", "-q", "-b", "sibling", filepath.Join(root, "app-b"))
+	common := filepath.Join(main, ".git")
+
+	cases := map[string]string{
+		filepath.Join(main, "src", "new", "file.go"):                    main, // need not exist
+		filepath.Join(main, ".claude", "worktrees", "a", "src", "x.go"): filepath.Join(main, ".claude", "worktrees", "a"),
+		filepath.Join(root, "app-b", "x.go"):                            filepath.Join(root, "app-b"),
+		filepath.Join(root, "app-b"):                                    filepath.Join(root, "app-b"),
+	}
+	for p, wantTop := range cases {
+		top, c, ok := Worktree(p)
+		if !ok || top != wantTop || c != common {
+			t.Errorf("Worktree(%s) = %q, %q, %v; want %q, %q", p, top, c, ok, wantTop, common)
+		}
+		// git agrees on the common dir.
+		if repo, ok, err := Inspect(context.Background(), wantTop); err != nil || !ok || repo.CommonDir != c {
+			t.Errorf("%s: git says %q (%v %v), Worktree %q", wantTop, repo.CommonDir, ok, err, c)
+		}
+	}
+	if _, _, ok := Worktree(filepath.Join(root, "elsewhere", "x.go")); ok {
+		t.Error("a path outside any repository has a work tree")
+	}
+	// A submodule's .git file names its own repository: no commondir.
+	sub := filepath.Join(root, "super", "sub")
+	os.MkdirAll(filepath.Join(root, "super", ".git", "modules", "sub"), 0o755)
+	os.MkdirAll(sub, 0o755)
+	os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: ../.git/modules/sub\n"), 0o644)
+	if top, c, ok := Worktree(filepath.Join(sub, "f.c")); !ok || top != sub || c != filepath.Join(root, "super", ".git", "modules", "sub") {
+		t.Errorf("submodule: %q, %q, %v", top, c, ok)
+	}
+	os.WriteFile(filepath.Join(sub, ".git"), []byte("garbage"), 0o644)
+	if _, _, ok := Worktree(filepath.Join(sub, "f.c")); ok {
+		t.Error("a malformed .git file was followed")
+	}
+}

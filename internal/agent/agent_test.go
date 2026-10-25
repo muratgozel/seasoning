@@ -538,6 +538,63 @@ func TestFileAwareness(t *testing.T) {
 	})
 }
 
+func TestFileAwarenessAcrossWorktrees(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	alice, bob := w.people["alice"], w.people["bob"]
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=T", "GIT_AUTHOR_EMAIL=t@example.com", "GIT_COMMITTER_NAME=T", "GIT_COMMITTER_EMAIL=t@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	// Both sessions start in their main checkouts, then work in worktrees:
+	// alice in one inside the repo (as EnterWorktree makes them), bob in a
+	// sibling directory.
+	aliceWT := filepath.Join(alice.repo, ".claude", "worktrees", "notify")
+	bobWT := filepath.Join(w.root, "bob-notify")
+	for _, p := range []*person{alice, bob} {
+		git(p.repo, "commit", "-q", "--allow-empty", "-m", "init")
+	}
+	git(alice.repo, "worktree", "add", "-q", "-b", "notify-a", aliceWT)
+	git(bob.repo, "worktree", "add", "-q", "-b", "notify-b", bobWT)
+	alice.start("sess-a", "startup")
+	bob.start("sess-b", "startup")
+	label(alice, t, "notify", "")
+	ctx := context.Background()
+
+	alice.hook(ctx, hooks.PostToolUse, map[string]any{"cwd": aliceWT, "tool_name": "Edit",
+		"tool_input": map[string]any{"file_path": filepath.Join(aliceWT, "src", "surfaces.ts")}}, nil)
+	// The branch shows once alice's turn ends in her worktree. Wait for it
+	// before bob edits: each (path, peer) warning is shown only once.
+	alice.hook(ctx, hooks.Stop, map[string]any{"cwd": aliceWT}, nil)
+	bob.seesPeer(t, "branch notify-a")
+	edit := map[string]any{"cwd": bobWT, "tool_name": "Edit", "tool_input": map[string]any{"file_path": filepath.Join(bobWT, "src", "surfaces.ts")}}
+	var warn string
+	eventually(t, "bob warned in his worktree about alice's file in hers", func() bool {
+		warn = bob.hook(ctx, hooks.PreToolUse, edit, nil).context()
+		return warn != ""
+	})
+	if !strings.Contains(warn, "alice/notify (branch notify-a") || !strings.Contains(warn, "edited src/surfaces.ts") {
+		t.Fatalf("warning: %q", warn)
+	}
+
+	// Bash edits in the worktree are found at Stop, where cwd is.
+	os.WriteFile(filepath.Join(aliceWT, "grant.ts"), []byte("x"), 0o644)
+	alice.hook(ctx, hooks.Stop, map[string]any{"cwd": filepath.Join(aliceWT, "src")}, nil)
+	eventually(t, "bob warned about a git-detected change in alice's worktree", func() bool {
+		c := bob.hook(ctx, hooks.PreToolUse, map[string]any{"cwd": bobWT, "tool_name": "Write", "tool_input": map[string]any{"file_path": filepath.Join(bobWT, "grant.ts")}}, nil).context()
+		return strings.Contains(c, "has uncommitted changes to grant.ts")
+	})
+	files, _ := alice.db.Files(ctx, "sess-a", 10)
+	for _, f := range files {
+		if strings.Contains(f.Path, "worktrees") {
+			t.Fatalf("a path kept its worktree prefix: %+v", files)
+		}
+	}
+}
+
 func TestClearRebindsAndResumeGetsHeldMessages(t *testing.T) {
 	w := newWorld(t, "alice", "bob")
 	alice, bob := w.people["alice"], w.people["bob"]
@@ -698,10 +755,130 @@ func TestSendValidation(t *testing.T) {
 		t.Fatalf("rename: %v %s", err, out)
 	}
 	alice.seesPeer(t, "bob/renamed")
-	if _, err := alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/you"}, Subject: "old name", Body: "b", ReplyExpected: no()}); err != nil {
+	if _, err := alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/you"}, Subject: "old name", Body: "b", ReplyExpected: yes()}); err != nil {
 		t.Fatalf("send to alias: %v", err)
 	}
 	eventually(t, "message to the alias is direct (wakes)", func() bool { return bob.rt().Has(runtime.Wake) })
+}
+
+func TestWakeRules(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	alice, bob := w.people["alice"], w.people["bob"]
+	alice.start("sess-a", "startup")
+	bob.start("sess-b", "startup")
+	label(alice, t, "lead", "")
+	label(bob, t, "worker", "")
+	alice.seesPeer(t, "bob/worker")
+	bob.seesPeer(t, "alice/lead")
+	ctx := context.Background()
+	// arrived waits for bob's newest message, delivers it as a human turn
+	// would, and reports whether it was wake-eligible.
+	arrived := func(subject string) bool {
+		t.Helper()
+		var wake bool
+		eventually(t, "bob receives "+subject, func() bool {
+			msgs, _ := bob.db.Recent(ctx, bob.local(t).RelaySession, 1)
+			if len(msgs) == 0 || msgs[0].Subject != subject {
+				return false
+			}
+			wake = msgs[0].Wake
+			return true
+		})
+		// The marker follows the row's commit.
+		if wake {
+			eventually(t, subject+" sets the wake marker", func() bool { return bob.rt().Has(runtime.Wake) })
+		} else if bob.rt().Has(runtime.Wake) {
+			t.Fatalf("%s: wake marker set for a message that doesn't wake", subject)
+		}
+		bob.hook(ctx, hooks.UserPromptSubmit, map[string]any{"prompt": "go on"}, nil)
+		bob.hook(ctx, hooks.Stop, nil, nil)
+		return wake
+	}
+
+	// A direct FYI doesn't wake an idle session, and doesn't hold its turn
+	// open, and the sender is told so.
+	out, err := alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/worker"}, Subject: "FYI: merged #12", Body: "No action needed.", ReplyExpected: no()})
+	if err != nil || !strings.Contains(out, "bob/worker: live but idle; queued for its next turn, not woken") {
+		t.Fatalf("FYI send: %v\n%s", err, out)
+	}
+	eventually(t, "bob receives the FYI", func() bool { return bob.rt().Has(runtime.Unread) })
+	if r := bob.hook(ctx, hooks.Stop, nil, nil); r.blockReason() != "" {
+		t.Fatalf("Stop blocked for a direct FYI: %s", r.out)
+	}
+	if arrived("FYI: merged #12") {
+		t.Fatal("a direct FYI is wake-eligible")
+	}
+
+	// wake=true wakes for an FYI the recipient is waiting on.
+	out, err = alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/worker"}, Subject: "B5 is merged, go ahead with B6", Body: "main at abc123.", ReplyExpected: no(), Wake: yes()})
+	if err != nil || strings.Contains(out, "not woken") {
+		t.Fatalf("handoff send: %v\n%s", err, out)
+	}
+	if !arrived("B5 is merged, go ahead with B6") {
+		t.Fatal("wake=true didn't wake")
+	}
+
+	// A question wakes; with wake=false it waits.
+	alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/worker"}, Subject: "Which port?", Body: "For the relay.", ReplyExpected: yes(), Wake: no()})
+	if arrived("Which port?") {
+		t.Fatal("wake=false woke")
+	}
+	alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/worker"}, Subject: "Which host?", Body: "For the relay.", ReplyExpected: yes()})
+	if !arrived("Which host?") {
+		t.Fatal("a question didn't wake")
+	}
+
+	// An answer wakes the asker, who is waiting for it, once.
+	if _, err := bob.agent.Send(ctx, agent.SendInput{To: []string{"alice/lead"}, Subject: "Is main green?", Body: "Before I rebase.", ReplyExpected: yes()}); err != nil {
+		t.Fatal(err)
+	}
+	var ask localdb.Message
+	eventually(t, "alice receives the question", func() bool {
+		msgs, _ := alice.db.Recent(ctx, alice.local(t).RelaySession, 1)
+		if len(msgs) == 1 && msgs[0].Subject == "Is main green?" {
+			ask = msgs[0]
+			return true
+		}
+		return false
+	})
+	alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/worker"}, Subject: "Yes, green at abc123", Body: "Go ahead.", ReplyExpected: no(), InReplyTo: ask.MessageID})
+	if !arrived("Yes, green at abc123") {
+		t.Fatal("an answer didn't wake the asker")
+	}
+	alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/worker"}, Subject: "Also: CI is slow today", Body: "Expect 20 min.", ReplyExpected: no(), InReplyTo: ask.MessageID})
+	if arrived("Also: CI is slow today") {
+		t.Fatal("a second answer to an answered question woke")
+	}
+
+	if _, err := alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/worker"}, Subject: "s", Body: "b", ReplyExpected: no(), Urgent: true, Wake: no()}); err == nil || !strings.Contains(err.Error(), "urgent") {
+		t.Fatalf("urgent with wake=false: %v", err)
+	}
+}
+
+// sibling is a second Claude Code process of p's person on p's machine: same
+// config, state dir and local.db.
+func (p *person) sibling(pid int) *person {
+	s := &person{w: p.w, handle: p.handle, st: p.st, state: p.state, dbPath: p.dbPath, db: p.db, repo: p.repo, pid: pid, id: p.id}
+	p.w.t.Cleanup(s.stopAgent)
+	return s
+}
+
+func TestBroadcastReachesEverySessionOnAMachine(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	alice, bob := w.people["alice"], w.people["bob"]
+	bob2 := bob.sibling(bob.pid + 100)
+	alice.start("sess-a", "startup")
+	bob.start("sess-b1", "startup")
+	bob2.start("sess-b2", "startup")
+	label(bob, t, "one", "")
+	label(bob2, t, "two", "")
+	alice.seesPeer(t, "bob/one")
+	alice.seesPeer(t, "bob/two")
+	if _, err := alice.agent.Send(context.Background(), agent.SendInput{To: []string{"bob/*"}, Subject: "Both of you", Body: "x", ReplyExpected: no()}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "bob's first session gets it", func() bool { return bob.rt().Has(runtime.Unread) })
+	eventually(t, "bob's second session gets it too", func() bool { return bob2.rt().Has(runtime.Unread) })
 }
 
 func TestUnjoinedSessionIsQuietAndExplains(t *testing.T) {
@@ -810,6 +987,17 @@ func TestMCPTools(t *testing.T) {
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "send", Arguments: map[string]any{"to": []string{"bob/nobody"}, "subject": "s", "body": "b", "reply_expected": false}})
 	if err != nil || !res.IsError || !strings.Contains(textOf(res), "no session is called bob/nobody") {
 		t.Fatalf("tool error not surfaced as text: %v %+v", err, res)
+	}
+	// A lone recipient as a string, or several in one, works like a list.
+	for _, to := range []string{"bob/target", "bob/target, bob/*"} {
+		res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "send", Arguments: map[string]any{"to": to, "subject": "s", "body": "b", "reply_expected": false, "wake": true}})
+		if err != nil || res.IsError || !strings.Contains(textOf(res), "bob/target: live; queued") {
+			t.Fatalf("send to %q: %v %s", to, err, textOf(res))
+		}
+	}
+	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "send", Arguments: map[string]any{"to": 7, "subject": "s", "body": "b", "reply_expected": false}})
+	if err != nil || !res.IsError {
+		t.Fatalf("a number for to: %v %+v", err, res)
 	}
 	res, err = cs.CallTool(ctx, &mcp.CallToolParams{Name: "peers"})
 	if err != nil || res.IsError || !strings.Contains(textOf(res), "bob/target") {
@@ -1030,6 +1218,11 @@ func TestSentMessagesAreShown(t *testing.T) {
 		"tool_response": []map[string]any{{"type": "text", "text": "no session is called bob/x"}}}, nil)
 	if failed.out != "" {
 		t.Fatalf("a failed send was displayed: %q", failed.out)
+	}
+	send["to"] = "bob/x"
+	if s := alice.hook(ctx, hooks.PostToolUse, map[string]any{"tool_name": "mcp__plugin_seasoning_seasoning__send", "tool_input": send,
+		"tool_response": []map[string]any{{"type": "text", "text": "Sent <01JB8Z00000000000000000000@seasoning> \"Main is frozen\"."}}}, nil).system(); !strings.HasPrefix(s, "seasoning → bob/x · FYI") {
+		t.Fatalf("sent display for a string to = %q", s)
 	}
 	other := alice.hook(ctx, hooks.PostToolUse, map[string]any{"tool_name": "Bash", "tool_input": map[string]any{"command": "echo Sent <x>"}, "tool_response": "Sent <x>"}, nil)
 	if other.out != "" {

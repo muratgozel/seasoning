@@ -109,4 +109,5 @@ The verified details are in spec §23 and §24. The ones that bite most often:
 - **Hook output:** a hook's `additionalContext` reaches the model, and its `systemMessage` reaches the human.
 - **Wake under `claude -p`:** an `asyncRewake` hook runs synchronously there. The waiter checks `CLAUDE_CODE_SESSION_ATTENDED`.
 - **`/clear`** keeps the MCP process but gives the session a new `session_id`.
+- **Worktrees:** per the docs, hook `cwd` follows EnterWorktree and `cd`, so a session's starting root goes stale. File paths are relative to the file's own work tree (`hooks.worktree`).
 - **Tests:** deny the built-in `SendMessage` and `ListAgents` tools, or agents use them instead of seasoning.

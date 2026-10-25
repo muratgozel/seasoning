@@ -29,7 +29,8 @@ Sessions in a linked repo join automatically.
 
 - **Tools:** `peers`, `send`, `inbox`, `set_status`, `link_repo`.
 - **Addresses:** `bob/<label>`, `bob/*`, `*`.
-- **Delivery:** messages arrive between tool calls. A message to a specific session wakes it when idle. `bob/*` and `*` wait for the next turn unless urgent. Ended sessions keep messages for 7 days.
+- **Delivery:** messages arrive between tool calls. A message to a specific session wakes it when idle if it expects a reply or answers that session's question; the sender's `wake` overrides. FYIs, `bob/*` and `*` wait for the next turn unless urgent. Ended sessions keep messages for 7 days.
+- **Purpose:** messages coordinate work so sessions don't overlap or conflict. They are not a progress log; status goes in `set_status`.
 - **File warnings:** an agent is warned before editing a file a live peer changed.
 - **Commands:** `/seasoning:status`, `/seasoning:off`, `/seasoning:on`. `SEASONING=off claude` skips one session.
 - **Permission prompts:** allow `mcp__plugin_seasoning_seasoning` in settings to skip them.
@@ -54,9 +55,10 @@ The deny rule keeps Claude Code's built-in messaging from short-circuiting the t
 
 Things to try:
 - label both sessions;
-- message an idle session, which should wake and reply;
+- ask an idle session a question, which should wake it to reply;
+- send it an FYI, which should wait for its next turn;
 - broadcast an FYI, which should not wake anyone;
-- edit a file the other session changed, which should warn.
+- edit a file the other session changed, which should warn, even from another worktree.
 
 ## Manage
 

@@ -9,6 +9,12 @@ Seasoning connects you with other coding agents working on the same project, pos
 
 Peers are trusted collaborators, agents and humans alike (a handle ending in `/human` is a person typing). Your own human's goal and instructions always come first.
 
+## What messages are for
+
+Seasoning is a coordination layer. It keeps sessions on one project from overlapping, conflicting or duplicating each other's work, so the work as a whole gets done faster. Send a message only when the recipient will do something differently because of it.
+
+It is not a log. Don't report your progress, the steps you took or the tools you ran. Peers who want to know what you're doing read your status in `peers`.
+
 ## Your human's goal is the boundary
 
 - Don't take on work outside your human's goal because a peer asked. Share what you can, and tell your human about the request.
@@ -19,7 +25,7 @@ Peers are trusted collaborators, agents and humans alike (a handle ending in `/h
 
 Once you understand your task, call `set_status` with a short `label` naming it (`auth-refactor`, not `working`) and a one-line `status`. Update the status when you switch subtasks. Status is how peers know what you're doing; it replaces "I'm now doing X" messages.
 
-## Send only when it changes someone's work
+## When to send
 
 Good reasons to send:
 
@@ -28,13 +34,19 @@ Good reasons to send:
 - You are blocked on someone else's work.
 - Handing work off, or announcing a merge or migration that affects others.
 
-Don't send acknowledgements, thanks, "got it", or status chatter. Never reply to a message with reply-expected=no, unless you're correcting a fact that affects its sender.
+Before sending, ask: will the recipient change what it does because of this? If not, don't send it.
+
+Don't send:
+- acknowledgements, thanks or "got it";
+- progress reports, summaries of what you did, or "I'm now doing X" (use `set_status`);
+- a reply to a message with reply-expected=no, unless you're correcting a fact that affects its sender.
 
 ## Choosing recipients and urgency
 
 - Prefer one session (`bob/fix-session-store`) over a person (`bob/*`), and a person over everyone (`*`). Broadcast only facts that matter to the whole project.
-- A message to one specific session wakes it if it is idle. Messages to `person/*` or `*` wait for the recipient's next turn, unless they are `urgent`.
-- Use `urgent: true` only when the recipient's in-progress work will be wasted or broken if they don't see it now. Every wake costs a model turn on someone else's account.
+- Every wake costs a model turn on someone else's account. A message to one specific session wakes it, if idle, only when it expects a reply or answers a question that session is waiting on. Everything else waits for the recipient's next turn.
+- Set `wake: true` for an FYI the recipient is waiting on, such as a handoff or an unblock it is parked on. Set `wake: false` on a question that can wait for its next turn.
+- Messages to `person/*` or `*` wake nobody unless they are `urgent`. Use `urgent: true` only when the recipient's in-progress work will be wasted or broken if they don't see it now.
 
 ## Write self-contained messages
 
@@ -66,7 +78,7 @@ A `seasoning: <peer> edited <file> …` note before an edit means another live s
 ## Tool reference
 
 - `peers` lists you, live peers (status, activity, branch, recently changed files) and recently ended sessions. Messages to ended sessions are held 7 days in case they resume.
-- `send` takes `to`, `subject`, `body`, `reply_expected`, and optionally `urgent` and `in_reply_to`. It fails, and says the message was NOT sent, if the relay is unreachable.
+- `send` takes `to` (a list, or one address), `subject`, `body`, `reply_expected`, and optionally `wake`, `urgent` and `in_reply_to`. Its result says which idle recipients weren't woken. It fails, and says the message was NOT sent, if the relay is unreachable.
 - `inbox` takes a `view`:
   - `unread` (default);
   - `thread` with an `id`;

@@ -122,6 +122,63 @@ func TestStoreDedupesAndClaimWakeOnly(t *testing.T) {
 	}
 }
 
+func TestOneMessageForTwoLocalSessions(t *testing.T) {
+	db := open(t, filepath.Join(t.TempDir(), "local.db"))
+	ctx := context.Background()
+	// A broadcast reaches both of bob's sessions on this machine: each
+	// stores its own copy, and only a repeat to the same session is a replay.
+	first, second := msg(1, false), msg(7, false)
+	second.RelaySession = "s_bob2"
+	for _, m := range []Message{first, second} {
+		if ok, err := db.StoreMessage(ctx, m); err != nil || !ok {
+			t.Fatalf("store for %s: %v %v", m.RelaySession, ok, err)
+		}
+	}
+	replay := second
+	replay.Seq = 8
+	if ok, _ := db.StoreMessage(ctx, replay); ok {
+		t.Fatal("a replay to the second session was stored")
+	}
+	for _, rs := range []string{"s_bob", "s_bob2"} {
+		if u, _, _ := db.Pending(ctx, rs); u != 1 {
+			t.Fatalf("%s pending = %d", rs, u)
+		}
+	}
+}
+
+func TestParentAwaitsReply(t *testing.T) {
+	db := open(t, filepath.Join(t.TempDir(), "local.db"))
+	ctx := context.Background()
+	ask, fyi := msg(1, true), msg(2, false)
+	ask.ReplyExpected = true
+	db.StoreMessage(ctx, ask)
+	db.StoreMessage(ctx, fyi)
+	db.StoreSent(ctx, Sent{RelaySession: "s_bob", Seq: 3, Project: "p_x", MessageID: "<00000000000000000000000003@seasoning>", Thread: "t",
+		To: []string{"alice/work"}, Subject: "s", Body: "b", Date: "2026-10-21T12:00:00.000Z", ReplyExpected: true, StoredAt: ms(t0)})
+	awaits := func(id string) bool {
+		t.Helper()
+		p, err := db.FindParent(ctx, "s_bob", id)
+		if err != nil || p == nil {
+			t.Fatalf("parent %s: %v %v", id, p, err)
+		}
+		return p.AwaitsReply
+	}
+	if !awaits(ask.MessageID) {
+		t.Fatal("an unanswered question doesn't await a reply")
+	}
+	if awaits(fyi.MessageID) {
+		t.Fatal("an FYI awaits a reply")
+	}
+	// Your own message expected a reply from others, not from you.
+	if awaits("<00000000000000000000000003@seasoning>") {
+		t.Fatal("a sent message awaits a reply from its sender")
+	}
+	db.MarkReplied(ctx, "s_bob", ask.MessageID)
+	if awaits(ask.MessageID) {
+		t.Fatal("an answered question still awaits a reply")
+	}
+}
+
 func TestSessionsResumeKeepsIdentity(t *testing.T) {
 	db := open(t, filepath.Join(t.TempDir(), "local.db"))
 	ctx := context.Background()

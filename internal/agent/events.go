@@ -149,7 +149,7 @@ func (a *Agent) onMessage(ctx context.Context, b *bound, data []byte) {
 	if m.InReplyTo != nil {
 		inReply = *m.InReplyTo
 	}
-	wake := m.Urgent || direct
+	wake := m.Urgent || (direct && m.WakesDirect())
 	stored, err := a.o.DB.StoreMessage(ctx, localdb.Message{
 		RelaySession: b.sid, Seq: me.Seq, Project: b.j.Keys.ID, MessageID: m.MessageID, Thread: m.Thread(),
 		References: m.References, FromHandle: m.From, FromPerson: from.Person, FromSession: m.FromSession,
@@ -176,7 +176,7 @@ func (a *Agent) onMessage(ctx context.Context, b *bound, data []byte) {
 }
 
 // addressedTo reports whether a message's addresses include session s, and
-// whether one names s specifically (only those wake without "urgent").
+// whether one names s specifically (only those can wake without "urgent").
 func addressedTo(to []string, s *localdb.Session) (direct, ok bool) {
 	mine := map[string]bool{s.Handle(): true}
 	for _, h := range s.AliasHandles() {

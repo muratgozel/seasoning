@@ -352,9 +352,9 @@ func (d *DB) UpdateSession(ctx context.Context, id string, fn func(*Session) err
 	if s.EndedAt != 0 {
 		ended = s.EndedAt
 	}
-	_, err = tx.ExecContext(ctx, `UPDATE sessions SET label = ?, aliases = ?, status = ?, activity = ?, branch = ?,
+	_, err = tx.ExecContext(ctx, `UPDATE sessions SET label = ?, aliases = ?, status = ?, activity = ?, branch = ?, worktree = ?,
 		autonomous_turns = ?, updated_at = ?, cursor = ?, ended_at = ? WHERE local_id = ?`,
-		s.Label, string(aliases), s.Status, s.Activity, s.Branch, s.AutonomousTurns, s.UpdatedAt, s.Cursor, ended, id)
+		s.Label, string(aliases), s.Status, s.Activity, s.Branch, s.Worktree, s.AutonomousTurns, s.UpdatedAt, s.Cursor, ended, id)
 	if err != nil {
 		return nil, err
 	}
@@ -467,18 +467,24 @@ func scanMessages(rows *sql.Rows, err error) ([]Message, error) {
 }
 
 // StoreMessage stores a received message. It reports false for a duplicate
-// (same stream item, or a message ID seen before: a replay).
+// (same stream item, or a message ID this session already has: a replay).
+//
+// Replays are detected per recipient session through the inbox, which keeps
+// rows longer than the 7-day replay window. Older binaries used the global
+// seen table, which dropped a broadcast's second copy when two sessions on
+// one machine both received it; it is no longer written, only pruned.
 func (d *DB) StoreMessage(ctx context.Context, m Message) (bool, error) {
 	tx, err := d.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO seen (message_id, at) VALUES (?, ?)`, m.MessageID, m.StoredAt)
+	var dup int
+	err = tx.QueryRowContext(ctx, `SELECT count(*) FROM inbox WHERE relay_session = ? AND message_id = ?`, m.RelaySession, m.MessageID).Scan(&dup)
 	if err != nil {
 		return false, err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	if dup > 0 {
 		return false, tx.Commit()
 	}
 	refs, _ := json.Marshal(nonNil(m.References))
@@ -487,7 +493,7 @@ func (d *DB) StoreMessage(ctx context.Context, m Message) (bool, error) {
 	if m.InReplyTo != "" {
 		inReply = m.InReplyTo
 	}
-	res, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO inbox (`+inboxCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, ?, ?)`,
+	res, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO inbox (`+inboxCols+`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 0, ?, ?)`,
 		m.RelaySession, m.Seq, m.Project, m.MessageID, m.Thread, string(refs), m.FromHandle, m.FromPerson, m.FromSession,
 		string(to), m.Subject, m.Body, m.Date, inReply, boolInt(m.ReplyExpected), boolInt(m.Urgent), boolInt(m.Wake),
 		m.ReceivedAt, m.StoredAt, m.Quarantine, m.FromKey)
@@ -655,15 +661,20 @@ type Parent struct {
 	MessageID  string
 	Thread     string
 	References []string
+	// AwaitsReply is set for a received message that expected a reply this
+	// session hasn't sent yet: its sender is waiting for the answer.
+	AwaitsReply bool
 }
 
 // FindParent looks a message ID up in the session's inbox and sent mail.
 func (d *DB) FindParent(ctx context.Context, relaySession, messageID string) (*Parent, error) {
 	var p Parent
 	var refs string
-	err := d.db.QueryRowContext(ctx, `SELECT message_id, thread, refs FROM inbox WHERE relay_session = ? AND message_id = ? AND quarantine = ''
-		UNION ALL SELECT message_id, thread, refs FROM sent WHERE relay_session = ? AND message_id = ? LIMIT 1`,
-		relaySession, messageID, relaySession, messageID).Scan(&p.MessageID, &p.Thread, &refs)
+	var awaits int
+	err := d.db.QueryRowContext(ctx, `SELECT message_id, thread, refs, reply_expected = 1 AND replied = 0 FROM inbox
+		WHERE relay_session = ? AND message_id = ? AND quarantine = ''
+		UNION ALL SELECT message_id, thread, refs, 0 FROM sent WHERE relay_session = ? AND message_id = ? LIMIT 1`,
+		relaySession, messageID, relaySession, messageID).Scan(&p.MessageID, &p.Thread, &refs, &awaits)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -671,6 +682,7 @@ func (d *DB) FindParent(ctx context.Context, relaySession, messageID string) (*P
 		return nil, err
 	}
 	json.Unmarshal([]byte(refs), &p.References)
+	p.AwaitsReply = awaits != 0
 	return &p, nil
 }
 

@@ -5,7 +5,7 @@ This plugin connects Claude Code sessions to [seasoning](https://github.com/mura
 - **Tools.** It adds the MCP tools `peers`, `send`, `inbox`, `set_status` and `link_repo`.
 - **Hooks.** They:
   - deliver peer messages between tool calls;
-  - wake idle sessions for direct messages;
+  - wake idle sessions for direct questions, answers and handoffs;
   - warn before editing a file another session just changed.
 - **Skill.** It teaches the agent messaging etiquette.
 - **Commands.** `/seasoning:off`, `/seasoning:on` and `/seasoning:status` hide or show a session.

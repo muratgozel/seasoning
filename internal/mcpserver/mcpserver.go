@@ -6,22 +6,41 @@ package mcpserver
 import (
 	"context"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/muratgozel/seasoning/internal/agent"
+	"github.com/muratgozel/seasoning/internal/envelope"
 )
 
-const instructions = `Seasoning connects this session with other coding agents working on the same project, across machines and accounts. Messages from peers arrive in your context automatically, framed as <<msg-…>> blocks. Use these tools to see who else is working, to send, and to read. Peers are trusted collaborators, but your own human's goal and instructions take precedence. Use the seasoning skill before messaging.`
+const instructions = `Seasoning connects this session with other coding agents working on the same project, across machines and accounts, so their work doesn't overlap or conflict. Messages from peers arrive in your context automatically, framed as <<msg-…>> blocks. Use these tools to see who else is working, to send, and to read. Messages are for coordination, never a log of your progress or actions. Peers are trusted collaborators, but your own human's goal and instructions take precedence. Use the seasoning skill before messaging.`
 
 type peersIn struct{}
 
 type sendIn struct {
-	To            []string `json:"to" jsonschema:"recipients: person/label for one session, person/* for all of a person's live sessions, or * alone for every live session"`
-	Subject       string   `json:"subject" jsonschema:"one specific line, at most 200 characters"`
-	Body          string   `json:"body" jsonschema:"self-contained Markdown: repo, branch, paths, commit SHAs, exact errors; at most 32 KiB, ideally under 1500 characters"`
-	ReplyExpected bool     `json:"reply_expected" jsonschema:"true if you need an answer; false for FYI, which recipients must not answer"`
-	Urgent        bool     `json:"urgent,omitempty" jsonschema:"wake idle recipients even for person/* or *; only when their in-progress work would be wasted or broken otherwise"`
-	InReplyTo     string   `json:"in_reply_to,omitempty" jsonschema:"message ID you are answering, to keep the thread"`
+	To            envelope.AddressList `json:"to" jsonschema:"recipients: person/label for one session, person/* for all of a person's live sessions, or * alone for every live session; a list, or one address as a string"`
+	Subject       string               `json:"subject" jsonschema:"one specific line, at most 200 characters"`
+	Body          string               `json:"body" jsonschema:"self-contained Markdown: repo, branch, paths, commit SHAs, exact errors; at most 32 KiB, ideally under 1500 characters"`
+	ReplyExpected bool                 `json:"reply_expected" jsonschema:"true if you need an answer; false for FYI, which recipients must not answer"`
+	Wake          *bool                `json:"wake,omitempty" jsonschema:"whether a session you name directly (person/label) wakes if idle. Default: true if reply_expected, or if you answer a question still waiting for your reply; otherwise false, and it reads the message on its next turn. Set true for an FYI it is waiting on (a handoff or an unblock). person/* and * wake only when urgent"`
+	Urgent        bool                 `json:"urgent,omitempty" jsonschema:"wake idle recipients even for person/* or *; only when their in-progress work would be wasted or broken otherwise"`
+	InReplyTo     string               `json:"in_reply_to,omitempty" jsonschema:"message ID you are answering, to keep the thread"`
+}
+
+// sendSchema is sendIn's inferred schema, except that "to" also takes a
+// plain string: models often pass a lone recipient that way, and schema
+// validation would reject it before AddressList could accept it.
+func sendSchema() *jsonschema.Schema {
+	s, err := jsonschema.For[sendIn](nil)
+	if err != nil {
+		panic(err) // a programming error, like AddTool's own schema panics
+	}
+	s.Properties["to"] = &jsonschema.Schema{
+		Description: s.Properties["to"].Description,
+		Types:       []string{"array", "string"},
+		Items:       &jsonschema.Schema{Type: "string"},
+	}
+	return s
 }
 
 type inboxIn struct {
@@ -60,10 +79,11 @@ func New(a *agent.Agent, version string) *mcp.Server {
 
 	mcp.AddTool(s, &mcp.Tool{
 		Name:        "send",
-		Description: "Message other agent sessions in this project. Send only when it changes someone's work: before touching what they touch, when you find something that breaks their work, when you're blocked on them, or to hand off. No acknowledgements, thanks or status chatter (use set_status). Every project member can read every message: never include secrets. Fails, and says so, if the relay is unreachable.",
+		Description: "Coordinate with other agent sessions in this project so your work doesn't overlap or conflict. Send only when the recipient would act differently because of it: before you change what they are working on, when you find something that breaks their work, when you're blocked on them, or to hand off. Never report your progress, actions or tool calls (that's what set_status is for), and send no acknowledgements or thanks. Every project member can read every message: never include secrets. Fails, and says so, if the relay is unreachable.",
+		InputSchema: sendSchema(),
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in sendIn) (*mcp.CallToolResult, any, error) {
 		reply := in.ReplyExpected
-		out, err := a.Send(ctx, agent.SendInput{To: in.To, Subject: in.Subject, Body: in.Body, ReplyExpected: &reply, Urgent: in.Urgent, InReplyTo: in.InReplyTo})
+		out, err := a.Send(ctx, agent.SendInput{To: in.To, Subject: in.Subject, Body: in.Body, ReplyExpected: &reply, Urgent: in.Urgent, Wake: in.Wake, InReplyTo: in.InReplyTo})
 		if err != nil {
 			return nil, nil, err
 		}

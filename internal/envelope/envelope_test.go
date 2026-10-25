@@ -216,6 +216,68 @@ func TestUnknownFieldsStayVerifiable(t *testing.T) {
 	}
 }
 
+func TestWakeDecision(t *testing.T) {
+	f := newFixture(t)
+	decode := func(m any) *Message {
+		t.Helper()
+		e := f.seal(t, m)
+		o, err := Open(f.project.EncKey, e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := DecodeMessage(o, e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	m := f.message(t)
+	off := false
+	m.Wake = &off
+	if got := decode(m); got.WakesDirect() {
+		t.Fatal("wake=false survived signing as a wake")
+	}
+	// A sender from before the field: its direct messages always woke.
+	b, _ := json.Marshal(f.message(t))
+	var old map[string]any
+	json.Unmarshal(b, &old)
+	if _, ok := old["wake"]; ok {
+		t.Fatal("an unset wake is serialized")
+	}
+	if got := decode(old); got.Wake != nil || !got.WakesDirect() {
+		t.Fatalf("a message without wake: %+v", got.Wake)
+	}
+}
+
+func TestAddressListAcceptsWhatModelsSend(t *testing.T) {
+	esc := func(s string) string { b, _ := json.Marshal(s); return string(b) }
+	cases := map[string][]string{
+		`["bob/x","bob/*"]`:          {"bob/x", "bob/*"},
+		`"bob/x"`:                    {"bob/x"},
+		`" bob/x, carol/y  dave/*,"`: {"bob/x", "carol/y", "dave/*"},
+		`"*"`:                        {"*"},
+		esc(`["bob/x", "carol/y"]`):  {"bob/x", "carol/y"},
+		`null`:                       nil,
+		`""`:                         {},
+	}
+	for in, want := range cases {
+		var got AddressList
+		if err := json.Unmarshal([]byte(in), &got); err != nil {
+			t.Errorf("%s: %v", in, err)
+			continue
+		}
+		if strings.Join(got, "|") != strings.Join(want, "|") {
+			t.Errorf("%s = %q, want %q", in, got, want)
+		}
+	}
+	for _, in := range []string{`7`, `{"to":"bob/x"}`, `[1]`} {
+		var got AddressList
+		if err := json.Unmarshal([]byte(in), &got); err == nil || !strings.Contains(err.Error(), "list of addresses") {
+			t.Errorf("%s: err = %v", in, err)
+		}
+	}
+}
+
 func TestMessageValidate(t *testing.T) {
 	f := newFixture(t)
 	long := strings.Repeat("x", MaxSubjectRunes+1)

@@ -201,11 +201,12 @@ func runSend(env Env) error {
 	}
 	defer stop()
 	// Nothing reads replies addressed to <you>/human, so agents are told not
-	// to send any; to get answers, ask in your own Claude Code session.
-	expected := false
+	// to send any; to get answers, ask in your own Claude Code session. A
+	// person writing to a session wants it to act, so it still wakes.
+	expected, wake := false, true
 	ctx, cancel := netCtx()
 	defer cancel()
-	out, err := a.Send(ctx, agent.SendInput{To: to, Subject: *subject, Body: text, ReplyExpected: &expected, Urgent: *urgent, InReplyTo: *replyTo})
+	out, err := a.Send(ctx, agent.SendInput{To: to, Subject: *subject, Body: text, ReplyExpected: &expected, Urgent: *urgent, Wake: &wake, InReplyTo: *replyTo})
 	if err != nil {
 		return err
 	}

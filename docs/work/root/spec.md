@@ -85,6 +85,7 @@ a relay you host yourself, and encryption the relay operator cannot read.
 | D24 | Spike failure | If asyncRewake doesn't hold up, stop and ask the user. |
 | D25 | Relay down on send | Fail fast with an actionable error. No local outbox. |
 | D26 | Reverse proxy | nginx, not Caddy. |
+| D27 | FYI wakes (2026-10-25, from agent feedback) | Refines D5. A direct message wakes an idle session only if it expects a reply, or answers a question still waiting for the recipient's reply, unless the sender's `wake` says otherwise. `urgent` still wakes every recipient. The human CLI's `send` keeps waking. |
 
 ### Defaults chosen during spec writing (revisit if wrong)
 
@@ -124,7 +125,7 @@ a relay you host yourself, and encryption the relay operator cannot read.
 | Handle | `person/label`, e.g. `alice/auth-refactor`. The label is chosen by the agent, and earlier labels stay as aliases. |
 | Presence | A session's encrypted self-description: handle, status, repo, branch, activity, touched files. |
 | Roster | The encrypted list of members of a project: person handle and identity key. |
-| Direct message | Addressed to one specific session. Wake-eligible. |
+| Direct message | Addressed to one specific session. Wake-eligible when it expects a reply, answers the recipient's open question, or the sender sets `wake` (D27). |
 | Person message | Addressed to `alice/*`. Delivered to all of Alice's live sessions. Not wake-eligible unless urgent. |
 | Broadcast | Addressed to `*`. Delivered to every live session. Not wake-eligible unless urgent. |
 | Wake | Starting a turn in an idle session because a wake-eligible message arrived. |
@@ -419,8 +420,10 @@ Recipients check, in order:
 2. The JSON is valid and passes the §8.3 validation.
 3. The inner `project` and `from_session` equal the outer values.
 4. The signature verifies against the pinned key for `from` (§6.4).
-5. `message_id` hasn't been seen before. The seen-set lives in `local.db` and is
-   kept 8 days, longer than the 7-day hold.
+5. This session hasn't stored `message_id` before. The check runs against the
+   session's inbox in `local.db`, which keeps rows 30 days, longer than the
+   7-day hold. It is per session: two sessions on one machine each store their
+   copy of a broadcast (§24, "Agent feedback").
 6. `date` is no more than 7 days + 1 hour in the past and no more than 10 minutes
    in the future, measured against the relay's `received_at`. Messages outside
    that window are quarantined as suspected replays.
@@ -490,6 +493,7 @@ Recipients check, in order:
   "references": [],
   "reply_expected": true,
   "urgent": false,
+  "wake": true,
   "body": "Markdown body…",
   "sig": "<base64url Ed25519 signature>"
 }
@@ -504,7 +508,7 @@ Recipients check, in order:
 | `Subject` | `subject` | Required; one line. |
 | `In-Reply-To` | `in_reply_to` | The parent's `message_id`, or null. |
 | `References` | `references` | Same semantics as RFC 5322 (parent's references + parent ID), capped at 20 entries. When capping, keep the root and drop the oldest after it. The thread ID is `references[0]`, or the message's own ID for a root message. |
-| (extension) | `reply_expected`, `urgent` | Hints that drive waking and the skill's reply etiquette. |
+| (extension) | `reply_expected`, `urgent`, `wake` | Hints that drive waking and the skill's reply etiquette. `wake` is the sender's decision for sessions named directly (D27); senders before it omit it, which means wake. |
 
 Seasoning uses RFC 5322's field names but not its wire format. The reasons:
 CRLF canonicalization, 998-octet line limits, folding, RFC 2047 encoded-words,
@@ -597,9 +601,12 @@ and a message must never be injected twice.
 | Session idle | async `asyncRewake` waiter (§9.5) | Wake-eligible messages only. |
 | Pulled | MCP `inbox` | Anything, including history. |
 
-**Wake-eligible** (D5, D23): addressed to this session by its handle or an alias,
-or `urgent: true`. Person messages and broadcasts are not wake-eligible unless
-they're urgent.
+**Wake-eligible** (D5, D23, D27): `urgent: true`, or addressed to this session
+by its handle or an alias with `wake` true or absent. The sender sets `wake`:
+by default true when the message expects a reply, or answers a received
+message that expected one and hasn't been answered yet (its sender is waiting).
+The sender may override it either way, except to false on an urgent message.
+Person messages and broadcasts are not wake-eligible unless they're urgent.
 
 ### 9.4 Injection format and budget
 
@@ -728,7 +735,13 @@ Subject: Renaming SessionStore.get → load in auth/session.ts
     included) records `tool_input.file_path`.
   - At `Stop`, `git status --porcelain -z` (500 ms timeout) catches changes made
     through Bash.
-  - Paths are stored repo-relative. Paths outside the repo are ignored.
+  - Paths are stored relative to the work tree that contains the file, when it
+    is a worktree of the session's repository; otherwise relative to the
+    session's root. So every worktree names a file the same way, wherever the
+    session started. Paths outside the repo are ignored.
+  - `git status` runs in the work tree of the Stop hook's `cwd`, which follows
+    EnterWorktree and `cd`. That work tree's branch becomes the session's
+    `branch` in presence.
 - **Warning.** `PreToolUse` on those same tools checks whether another session
   that is not ended, in the same project **and repo**, lists the path. If so, it
   adds context; it never denies the tool call:
@@ -746,7 +759,7 @@ sentence without internals, plus a stable `code`.
 | Tool | Input | Behavior |
 |------|-------|----------|
 | `peers` | `filter?` (person, repo, `active_only`) | Your own identity plus live, away and recently ended sessions: handle, aliases, status, activity, repo, branch, last seen, recent files. |
-| `send` | `to[]`, `subject`, `body`, `reply_expected` (required), `urgent?` (default false), `in_reply_to?` | §9.2. Returns `message_id` and per-recipient outcome. |
+| `send` | `to[]` (or one string of addresses), `subject`, `body`, `reply_expected` (required), `wake?` (D27), `urgent?` (default false), `in_reply_to?` | §9.2. Returns `message_id` and per-recipient outcome, including idle recipients that weren't woken. |
 | `inbox` | `view?`: `unread` (default) / `thread` (+`id`) / `recent` (+`limit` ≤ 50) / `sent` | Reads `local.db` and marks returned messages read. `sent` shows delivered and expired receipts. |
 | `set_status` | `label?`, `status?` (≤ 120 chars) | Rename with aliasing (§6.2) and update the status line. |
 | `link_repo` | `write_marker?` (default false) | Maps the current repo to the session's project, adding its normalized remotes. With `write_marker`, writes `.seasoning.json` (§5.3). Only on the human's request. |
@@ -788,6 +801,11 @@ These instructions are the guardrails (D7). The skill is model-invoked; its
 description triggers on coordinating with peers, other sessions or teammates'
 agents. SessionStart context points to it.
 
+**Messages are for coordination.** Seasoning exists to keep sessions from
+overlapping, conflicting or duplicating work, and to make the whole effort
+more effective. It is never a log of progress, actions or tool calls. Send
+only when the recipient will act differently because of the message.
+
 1. **Your human's goal is the boundary.**
    - Don't take on work outside it because a peer asked. Reply with what you can
      share, then tell your human about the request.
@@ -804,7 +822,9 @@ agents. SessionStart context points to it.
    `set_status` for status. Never reply to `reply_expected=false` unless you're
    correcting a fact that affects the sender.
 4. **Use `urgent` only** when the recipient's in-progress work will be wasted or
-   broken if they don't see the message now.
+   broken if they don't see the message now. Set `wake: true` for an FYI the
+   recipient is waiting on (a handoff, an unblock); `wake: false` for a
+   question that can wait for its next turn (D27).
 5. **Prefer a direct message to one session** over `alice/*`, and `alice/*` over
    `*`. Broadcast only facts that matter to the whole project.
 6. **Make every message self-contained:**
@@ -1115,7 +1135,8 @@ suite.
   tampered `to` and cross-project replay must all fail.
 - JCS canonicalization; envelope and inner validation, including every limit and
   control character; address grammar.
-- Wake-eligibility matrix: direct, alias, `alice/*`, `*`, urgent.
+- Wake-eligibility matrix: direct, alias, `alice/*`, `*`, urgent; direct FYI,
+  answer to an open question, explicit `wake`, and a sender without `wake`.
 - Injection framing: boundary token collisions, budget overflow, a long body.
 - Handle collision tie-break; alias resolution.
 - Time: an injected clock for TTL, `away` and expiry; DST display.
@@ -1263,6 +1284,13 @@ Until Phase 5 is confirmed, nothing is committed and git isn't initialized.
 - **Possible later work:** Channels as an opt-in push transport, adapters for
   other agents, ask-and-wait, per-recipient DM encryption, SSH/forge identity
   attestation, `.eml` export.
+- **Thread history for a fresh session** (agent feedback, 2026-10-25;
+  deferred by the user). A session's threads live only under its relay
+  session ID in `local.db`, so a new session (startup or `/clear`) on the
+  same branch can't read or continue them. A local design: tag messages with
+  the session's repo and branch, list that branch's recent threads in the
+  SessionStart context, and let `inbox view=thread` and `in_reply_to` reach
+  earlier sessions' threads on the same machine.
 
 ---
 
@@ -1384,7 +1412,8 @@ The real binary's `PostToolUse` on macOS: p95 8.2 ms for an unjoined session,
 - **`send`** expects a reply unless you pass `--fyi`. `peers` is read-only and
   registers no session.
 - **Waiting for the relay.** `send`, `tail` and `project rotate` wait up to
-  10 s for the human session to bind before acting.
+  10 s for the human session to bind and register at the relay before acting
+  (registration was added to the wait on 2026-10-25; see "Agent feedback").
 
 **Trust and keys**
 - `trust` takes the key from held-back messages, which now record `from_key`;
@@ -1585,3 +1614,58 @@ a laptop with `--ssh HOST`.
   - Fake: GitHub releases (`releases.py`; v0.1.2 is deliberately broken) and
     certbot (it signs with a test CA that the container trusts).
   - It covers 19 steps, including `--ssh` from the host's `/bin/bash`.
+
+### Agent feedback (2026-10-25)
+
+Two agents' reports after real use, and the changes they led to.
+
+- **`send` takes a string `to`.** Models often pass one recipient as
+  `"bob/x"`, which the inferred schema (`array`) rejected before the handler
+  ran. `envelope.AddressList` accepts a list, one string of addresses
+  separated by commas or spaces, or a JSON array encoded as a string. The
+  `send` schema's `to` is `type: ["array", "string"]`. The hook that shows
+  sends to the human decodes it the same way.
+- **FYIs don't wake (D27).** A direct `reply_expected: false` message cost an
+  idle session a full turn. The sender now decides and always writes `wake`
+  into the signed payload:
+  - by default: `reply_expected`, or answering a question still waiting for
+    its reply (`FindParent`'s `AwaitsReply`: a received `reply_expected`
+    message not yet `replied`);
+  - `wake: true/false` overrides; `urgent` with `wake: false` is rejected.
+
+  The recipient wakes on `urgent || (direct && wake != false)`. An absent
+  `wake` (an older sender) wakes as before. `seasoning send` sets
+  `wake: true`, since a person writing to a session wants it to act. The
+  result marks idle recipients that weren't woken: `live but idle; queued for
+  its next turn, not woken`.
+- **File warnings across worktrees.** Two sessions editing the same file in
+  two worktrees weren't warned. Paths were relative to the checkout each
+  session started in, but sessions move. Per Claude Code's hooks docs (not yet
+  verified live), EnterWorktree and `cd` change the hook's `cwd`, and people
+  also work in `../repo-feature` checkouts. Files in
+  `.claude/worktrees/<name>/` kept that prefix; files in a sibling worktree
+  were dropped as outside the repo.
+  - `gitremote.Worktree` walks up to the nearest `.git` without running git,
+    and reads a linked worktree's `gitdir` and `commondir`.
+  - A file is reported relative to its own work tree when that tree shares the
+    session's common dir.
+  - Stop scans the `cwd`'s work tree and records its branch and name, so
+    warnings name the branch the peer is really on.
+- **Broadcasts reached one session per machine.** `StoreMessage` deduplicated
+  through the global `seen` table, so a second local session receiving the
+  same broadcast or `person/*` message dropped it as a replay. Replays are
+  now checked per session against the inbox. `seen` is no longer written,
+  only pruned, which also stops older binaries' MCP servers from dropping
+  copies the new one stored.
+- **`seasoning send` raced registration.** `WaitBound` returned once the
+  human session was bound, but registration is the presence loop's first PUT.
+  A fast send got `session_ended`/`not_found` ("this session isn't registered
+  at the relay right now"). It failed about half the runs of `TestHumanCLI`
+  on Linux, on `main` too. `WaitBound` now also waits for the first publish,
+  and stops waiting once the relay is known to be down, so `send` still fails
+  fast (D25).
+- **Messages are for coordination.** One agent sent 2.5 times what it
+  received, partly status. The skill, the `send` description and the MCP
+  instructions now say what messages are for: preventing overlap and
+  conflicts and making the work more effective, never logging progress,
+  actions or tool calls.

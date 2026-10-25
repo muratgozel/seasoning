@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -204,6 +205,61 @@ func gitRaw(ctx context.Context, dir string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// Worktree finds the git work tree containing path (which may not exist
+// yet) by walking up to the nearest .git entry, without running git: hooks
+// call it on every edit. It returns the work tree's top level and the
+// repository's common dir, symlinks resolved; every worktree of a
+// repository shares the common dir. ok is false outside a work tree, and
+// for layouts it doesn't follow (GIT_DIR, core.worktree).
+func Worktree(path string) (top, commonDir string, ok bool) {
+	dir := filepath.Clean(path)
+	for {
+		dotgit := filepath.Join(dir, ".git")
+		if fi, err := os.Stat(dotgit); err == nil {
+			if fi.IsDir() {
+				return realpath(dir), realpath(dotgit), true
+			}
+			gitDir, err := linkedGitDir(dir, dotgit)
+			if err != nil {
+				return "", "", false
+			}
+			common := gitDir
+			// A linked worktree's git dir names the shared one; a
+			// submodule's has no commondir and is its own repository.
+			if raw, err := os.ReadFile(filepath.Join(gitDir, "commondir")); err == nil {
+				common = strings.TrimSpace(string(raw))
+				if !filepath.IsAbs(common) {
+					common = filepath.Join(gitDir, common)
+				}
+			}
+			return realpath(dir), realpath(common), true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", "", false
+		}
+		dir = parent
+	}
+}
+
+// linkedGitDir reads a .git file ("gitdir: <path>"), which linked worktrees
+// and submodules have instead of a .git directory.
+func linkedGitDir(dir, dotgit string) (string, error) {
+	raw, err := os.ReadFile(dotgit)
+	if err != nil {
+		return "", err
+	}
+	gitDir, ok := strings.CutPrefix(strings.TrimSpace(string(raw)), "gitdir:")
+	if !ok {
+		return "", fmt.Errorf("%s is not a gitdir file", dotgit)
+	}
+	gitDir = strings.TrimSpace(gitDir)
+	if !filepath.IsAbs(gitDir) {
+		gitDir = filepath.Join(dir, gitDir)
+	}
+	return gitDir, nil
 }
 
 func realpath(p string) string {
