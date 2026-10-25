@@ -1,5 +1,8 @@
 # Secrets and local state never belong in this public repo.
 .secrets/
+# Personal agent settings and notes; shared conventions go in CLAUDE.md.
+.claude/settings.local.json
+CLAUDE.local.md
 *.env
 .env*
 !.env.example
