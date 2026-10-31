@@ -1,6 +1,6 @@
 {
   "name": "seasoning",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "See which other agent sessions are working on your project and message them, end-to-end encrypted, across machines and accounts.",
   "repository": "https://github.com/muratgozel/seasoning",
   "license": "MIT",
