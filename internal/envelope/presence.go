@@ -127,6 +127,52 @@ func (p *Presence) Validate() error {
 	return nil
 }
 
+// SealPresence seals p for every session, keeping only as many of its files
+// as fit in an envelope of maxBytes as the relay measures it (SPEC §10.1).
+// p.Files must be newest first, so the oldest are dropped. p is not changed.
+//
+// MaxFiles alone doesn't bound the size: 200 long paths seal to about twice
+// MaxPresenceBytes, and the relay rejects the whole registration.
+func SealPresence(key [32]byte, id keys.Identity, project, fromSession string, p *Presence, maxBytes int) (*Envelope, error) {
+	seal := func(n int) (*Envelope, bool, error) {
+		c := *p
+		c.Files = p.Files[:n]
+		e, err := Seal(key, id, KindPresence, project, fromSession, Recipients{All: true}, &c)
+		if err != nil {
+			return nil, false, err
+		}
+		raw, err := json.Marshal(e)
+		if err != nil {
+			return nil, false, fmt.Errorf("seal: %w", err)
+		}
+		return e, len(raw) <= maxBytes, nil
+	}
+	e, fits, err := seal(len(p.Files))
+	if err != nil || fits {
+		return e, err
+	}
+	// The size grows with every file: find the most that fit. lo fits (or is
+	// -1, before any does); hi doesn't.
+	var best *Envelope
+	lo, hi := -1, len(p.Files)
+	for hi-lo > 1 {
+		mid := lo + (hi-lo)/2
+		e, fits, err := seal(mid)
+		if err != nil {
+			return nil, err
+		}
+		if fits {
+			lo, best = mid, e
+		} else {
+			hi = mid
+		}
+	}
+	if best == nil {
+		return nil, fmt.Errorf("presence does not fit the relay's %d-byte limit even without files; shorten the status", maxBytes)
+	}
+	return best, nil
+}
+
 // CheckStatus validates a status line.
 func CheckStatus(s string) error { return checkLine("status", s, MaxStatusRunes) }
 

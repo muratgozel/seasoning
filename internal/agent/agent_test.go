@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -11,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,6 +49,9 @@ type world struct {
 	secret keys.Secret
 	people map[string]*person
 	nextID int
+	// intercept, when set, sees each relay request first and answers the
+	// ones it returns true for.
+	intercept atomic.Pointer[func(http.ResponseWriter, *http.Request) bool]
 }
 
 type person struct {
@@ -75,8 +81,15 @@ func newWorld(t *testing.T, handles ...string) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs := httptest.NewServer(srv.Handler())
-	w := &world{t: t, root: root, hs: hs, srv: srv, people: map[string]*person{}}
+	w := &world{t: t, root: root, srv: srv, people: map[string]*person{}}
+	relayHandler := srv.Handler()
+	hs := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if f := w.intercept.Load(); f != nil && (*f)(rw, r) {
+			return
+		}
+		relayHandler.ServeHTTP(rw, r)
+	}))
+	w.hs = hs
 	t.Cleanup(func() {
 		for _, p := range w.people {
 			p.stopAgent()
@@ -253,7 +266,8 @@ func (p *person) startAgent() {
 		Config: p.st, DB: p.db, Runtime: p.rt(), Getenv: p.getenv(nil), Version: "test",
 		Log:       func(where string, err error) { p.w.t.Logf("%s agent %s: %v", p.handle, where, err) },
 		Heartbeat: 200 * time.Millisecond, PresenceDebounce: 20 * time.Millisecond, PresencePoll: 30 * time.Millisecond,
-		PeersRefresh: 300 * time.Millisecond, BindPoll: 30 * time.Millisecond, BindWait: 3 * time.Second,
+		PresenceRetryMax: 400 * time.Millisecond,
+		PeersRefresh:     300 * time.Millisecond, BindPoll: 30 * time.Millisecond, BindWait: 3 * time.Second,
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	p.stop = cancel
@@ -592,6 +606,91 @@ func TestFileAwarenessAcrossWorktrees(t *testing.T) {
 		if strings.Contains(f.Path, "worktrees") {
 			t.Fatalf("a path kept its worktree prefix: %+v", files)
 		}
+	}
+}
+
+func TestManyChangedFilesStillRegister(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	alice, bob := w.people["alice"], w.people["bob"]
+	bob.start("sess-b", "startup")
+	label(bob, t, "review", "")
+	ctx := context.Background()
+
+	// alice's session changed more files than presence can carry: 200 long
+	// monorepo paths seal to about twice the relay's 16 KiB limit.
+	alice.session = "sess-a"
+	if r := alice.hook(ctx, hooks.SessionStart, map[string]any{"source": "startup"}, nil); r.code != 0 {
+		t.Fatalf("session start: %+v", r)
+	}
+	start := time.Now().Add(-time.Hour)
+	for i := range 300 {
+		path := fmt.Sprintf("packages/acme-api-session-store/src/handlers/session-%03d.ts", i)
+		if err := alice.db.TouchFile(ctx, "sess-a", path, "edit", start.Add(time.Duration(i)*time.Second)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	alice.startAgent()
+	label(alice, t, "docs", "")
+
+	// Peers see her, newest files first.
+	if out := bob.seesPeer(t, "alice/docs"); !strings.Contains(out, "recently changed: packages/acme-api-session-store/src/handlers/session-299.ts") {
+		t.Fatalf("peers:\n%s", out)
+	}
+	if _, err := alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/review"}, Subject: "s", Body: "b", ReplyExpected: no()}); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	edit := map[string]any{"tool_name": "Edit", "tool_input": map[string]any{"file_path": filepath.Join(bob.repo, "packages", "acme-api-session-store", "src", "handlers", "session-299.ts")}}
+	if warn := bob.hook(ctx, hooks.PreToolUse, edit, nil).context(); !strings.Contains(warn, "alice/docs") {
+		t.Fatalf("no warning about alice's newest file: %q", warn)
+	}
+}
+
+func TestFailedRegistrationBacksOffAndExplains(t *testing.T) {
+	w := newWorld(t, "alice", "bob")
+	alice, bob := w.people["alice"], w.people["bob"]
+	bob.start("sess-b", "startup")
+	label(bob, t, "review", "")
+	ctx := context.Background()
+
+	// The relay refuses alice's registration as it refuses an oversized
+	// presence.
+	aliceSession := w.keys.SessionID("sess-a")
+	var puts atomic.Int32
+	reject := func(rw http.ResponseWriter, r *http.Request) bool {
+		if r.Method != http.MethodPut || !strings.HasSuffix(r.URL.Path, "/sessions/"+aliceSession) {
+			return false
+		}
+		puts.Add(1)
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusRequestEntityTooLarge)
+		json.NewEncoder(rw).Encode(relayapi.ErrorBody{Error: relayapi.ErrorDetail{
+			Code: relayapi.CodePayloadTooLarge, Message: "envelope is 33732 bytes; the limit is 16384"}})
+		return true
+	}
+	w.intercept.Store(&reject)
+	alice.start("sess-a", "startup")
+	eventually(t, "alice tries to register", func() bool { return puts.Load() > 0 })
+
+	// The 30 ms presence poll would retry about 50 times in 1.5 s; backing
+	// off from 30 ms to 400 ms, it retries about 7 times.
+	time.Sleep(1500 * time.Millisecond)
+	if n := puts.Load(); n < 2 || n > 12 {
+		t.Fatalf("%d registration attempts in 1.5 s", n)
+	}
+
+	// send says why the session isn't registered instead of "try again".
+	alice.seesPeer(t, "bob/review")
+	_, err := alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/review"}, Subject: "s", Body: "b", ReplyExpected: no()})
+	if err == nil || !strings.Contains(err.Error(), "envelope is 33732 bytes") || !strings.Contains(err.Error(), "NOT sent") ||
+		strings.Contains(err.Error(), "Try again in a few seconds") {
+		t.Fatalf("send: %v", err)
+	}
+
+	// Once the relay accepts it, the next retry registers her.
+	w.intercept.Store(nil)
+	bob.seesPeer(t, "alice/")
+	if _, err := alice.agent.Send(ctx, agent.SendInput{To: []string{"bob/review"}, Subject: "s", Body: "b", ReplyExpected: no()}); err != nil {
+		t.Fatalf("send after recovery: %v", err)
 	}
 }
 

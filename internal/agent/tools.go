@@ -337,6 +337,9 @@ func (a *Agent) Send(ctx context.Context, in SendInput) (string, error) {
 		return "", errors.New("some recipients' sessions no longer exist on the relay; the message was NOT sent. Check the current list with the peers tool")
 	case relayclient.IsCode(err, relayapi.CodeSessionEnded), relayclient.IsCode(err, relayapi.CodeNotFound):
 		b.Poke()
+		if rerr := b.registerErr(); rerr != nil {
+			return "", fmt.Errorf("this session isn't registered at the relay; registering it failed: %v. The message was NOT sent; tell your human", rerr)
+		}
 		return "", errors.New("this session isn't registered at the relay right now; the message was NOT sent. Try again in a few seconds")
 	case err != nil:
 		return "", fmt.Errorf("the message was NOT sent: %w", err)

@@ -715,9 +715,12 @@ Subject: Renaming SessionStore.get → load in auth/session.ts
 
 - No hostname, OS username, email or absolute path ever appears in presence.
 - Presence is capped at 16 KiB. `files` holds at most 200 entries, keeping the
-  most recent.
+  most recent; when the sealed envelope would pass 16 KiB, the oldest are
+  dropped until it fits.
 - The MCP process publishes presence on change (debounced to at most once every
-  5 s) and heartbeats every 20 s.
+  5 s) and heartbeats every 20 s. After a failed publish or heartbeat it retries
+  no sooner than 2 s later, doubling up to 1 min per consecutive failure;
+  `set_status` and `send` retry at once.
 - The relay marks a session:
   - `away` after 60 s without a heartbeat;
   - `ended` on explicit end (`SessionEnd` or MCP stdin closing).
@@ -1669,3 +1672,25 @@ Two agents' reports after real use, and the changes they led to.
   instructions now say what messages are for: preventing overlap and
   conflicts and making the work more effective, never logging progress,
   actions or tool calls.
+
+### Presence over its size limit (2026-10-31)
+
+An agent reported every `send` refused as "isn't registered".
+
+- **Cause.** Presence capped `files` at 200 entries but not by size. 200
+  monorepo paths of about 60 bytes sealed to 31–34 KB. The relay rejected the
+  registration (`envelope is 33732 bytes; the limit is 16384`), so the session
+  never registered. `peers` and `set_status` still worked, since neither needs
+  registration.
+- **Fix.** `envelope.SealPresence` drops the oldest files until the envelope,
+  as the relay measures it, fits `MaxPresenceBytes`. It seals once when
+  presence fits, and binary-searches the file count when it doesn't.
+- **Retry flood.** A failed PUT cleared `lastPresence`, and `lastPublish` was
+  never set, so each 2 s poll retried and logged a line to `errors.log`
+  (1,200 lines in 27 min per session). Failed publishes and heartbeats now back
+  off from `PresencePoll`, doubling to `PresenceRetryMax` (1 min). Pokes
+  (`set_status`, `send`) bypass the backoff. The heartbeat and the stream
+  loop's re-register don't.
+- **`send` explains.** When the relay answers but the session isn't registered,
+  `send` reports the last registration error instead of "try again in a few
+  seconds".

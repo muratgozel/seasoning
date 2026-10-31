@@ -38,6 +38,7 @@ type Options struct {
 	Heartbeat        time.Duration // relay heartbeat (20s)
 	PresenceDebounce time.Duration // minimum gap between presence publishes (5s)
 	PresencePoll     time.Duration // how often local state is checked for changes (2s)
+	PresenceRetryMax time.Duration // longest wait between failed publishes (1m)
 	PeersRefresh     time.Duration // full peer list refresh (60s)
 	BindPoll         time.Duration // binding.json check (1s)
 	BindWait         time.Duration // wait for SessionStart before starting alone (10s)
@@ -53,6 +54,7 @@ func (o *Options) defaults() {
 	def(&o.Heartbeat, 20*time.Second)
 	def(&o.PresenceDebounce, 5*time.Second)
 	def(&o.PresencePoll, 2*time.Second)
+	def(&o.PresenceRetryMax, time.Minute)
 	def(&o.PeersRefresh, 60*time.Second)
 	def(&o.BindPoll, time.Second)
 	def(&o.BindWait, 10*time.Second)
@@ -102,6 +104,9 @@ type bound struct {
 	lastPresence  string
 	lastPublish   time.Time
 	rosterFetched time.Time
+	failures      int       // consecutive failed publishes and heartbeats
+	retryAt       time.Time // unforced publishes wait until then
+	lastErr       error     // the latest failure; nil after a success
 }
 
 // Run serves until ctx ends, then ends the session at the relay.
@@ -306,12 +311,18 @@ func (a *Agent) presence(ctx context.Context, b *bound) (*envelope.Presence, err
 	return p, p.Validate()
 }
 
-// publish sends presence when it changed (and, unless forced, when the
-// debounce allows).
+// publish sends presence when it changed. Unless forced, it waits for the
+// debounce and, after a failure, for the retry backoff.
 func (a *Agent) publish(ctx context.Context, b *bound, force bool) {
+	b.mu.Lock()
+	backingOff := a.o.Now().Before(b.retryAt)
+	b.mu.Unlock()
+	if backingOff && !force {
+		return
+	}
 	p, err := a.presence(ctx, b)
 	if err != nil {
-		a.o.Log("build presence", err)
+		a.failed(b, "build presence", err)
 		return
 	}
 	key := presenceKey(p)
@@ -322,9 +333,9 @@ func (a *Agent) publish(ctx context.Context, b *bound, force bool) {
 	if !changed || !due {
 		return
 	}
-	env, err := envelope.Seal(b.j.Keys.EncKey, b.j.Identity, envelope.KindPresence, b.j.Keys.ID, b.sid, envelope.Recipients{All: true}, p)
+	env, err := envelope.SealPresence(b.j.Keys.EncKey, b.j.Identity, b.j.Keys.ID, b.sid, p, envelope.MaxPresenceBytes)
 	if err != nil {
-		a.o.Log("seal presence", err)
+		a.failed(b, "seal presence", err)
 		return
 	}
 	if _, err := b.client.PutSession(ctx, b.j.Keys, b.sid, env); err != nil {
@@ -334,17 +345,18 @@ func (a *Agent) publish(ctx context.Context, b *bound, force bool) {
 	a.relayUp()
 	b.mu.Lock()
 	b.lastPresence, b.lastPublish = key, a.o.Now()
+	b.failures, b.retryAt, b.lastErr = 0, time.Time{}, nil
 	b.mu.Unlock()
 }
 
 // heartbeat keeps the session live; it republishes presence if the relay
-// lost it (its last publish failed).
+// lost it (its last publish failed), once the retry backoff allows.
 func (a *Agent) heartbeat(ctx context.Context, b *bound) {
 	b.mu.Lock()
 	published := b.lastPresence != ""
 	b.mu.Unlock()
 	if !published {
-		a.publish(ctx, b, true)
+		a.publish(ctx, b, false)
 		return
 	}
 	if _, err := b.client.PutSession(ctx, b.j.Keys, b.sid, nil); err != nil {
@@ -366,10 +378,28 @@ func (a *Agent) putFailed(ctx context.Context, b *bound, err error) {
 	default:
 		a.relayDown(b, err)
 	}
-	a.o.Log("publish presence", err)
 	b.mu.Lock()
 	b.lastPresence = "" // republish once the relay is back
 	b.mu.Unlock()
+	a.failed(b, "publish presence", err)
+}
+
+// failed logs a failed publish or heartbeat and backs off: unforced retries
+// wait at least PresencePoll, doubling with each consecutive failure up to
+// PresenceRetryMax. Without it, every poll retried a failure that won't fix
+// itself (a rejected presence) and flooded errors.log. Forced publishes
+// (set_status, send) still try at once.
+func (a *Agent) failed(b *bound, where string, err error) {
+	a.o.Log(where, err)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.failures++
+	wait := a.o.PresencePoll
+	for i := 1; i < b.failures && wait < a.o.PresenceRetryMax; i++ {
+		wait *= 2
+	}
+	b.retryAt = a.o.Now().Add(min(wait, a.o.PresenceRetryMax))
+	b.lastErr = err
 }
 
 // registered reports whether the session's presence reached the relay.
@@ -377,6 +407,19 @@ func (b *bound) registered() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.lastPresence != ""
+}
+
+// registerErr returns why the session isn't registered at a relay that
+// answers, or nil when it is registered, or the last failure was the relay
+// being unreachable.
+func (b *bound) registerErr() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var ue *relayclient.UnreachableError
+	if b.lastPresence != "" || errors.As(b.lastErr, &ue) {
+		return nil
+	}
+	return b.lastErr
 }
 
 // Poke publishes presence now (after set_status).
@@ -410,8 +453,9 @@ func (a *Agent) streamLoop(ctx context.Context, b *bound) {
 		}
 		if relayclient.IsCode(err, relayapi.CodeNotFound) {
 			// Not registered yet (the first presence PUT is racing us) or
-			// purged: re-register, then reconnect.
-			a.publish(ctx, b, true)
+			// purged: re-register, then reconnect. Unforced, so a failing
+			// registration keeps its backoff.
+			a.publish(ctx, b, false)
 		} else {
 			a.relayDown(b, err)
 		}
